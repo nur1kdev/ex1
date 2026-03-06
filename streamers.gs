@@ -24,11 +24,18 @@ const START_ROW      = 2;
 
 function getTwitchCredentials() {
   const props = PropertiesService.getScriptProperties();
+
+  // Нормальный путь: в этих константах должны быть ИМЕНА ключей Script Properties
   const propClientId = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_ID);
   const propClientSecret = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_SECRET);
 
-  const clientId = propClientId || TWITCH_CLIENT_ID;
-  const clientSecret = propClientSecret || TWITCH_CLIENT_SECRET;
+  // Защита от частой ошибки: если в SCRIPT_PROP_* случайно вставили реальные значения ключей
+  const constLooksLikeValue =
+    SCRIPT_PROP_TWITCH_CLIENT_ID !== 'TWITCH_CLIENT_ID' ||
+    SCRIPT_PROP_TWITCH_CLIENT_SECRET !== 'TWITCH_CLIENT_SECRET';
+
+  const clientId = propClientId || (constLooksLikeValue ? SCRIPT_PROP_TWITCH_CLIENT_ID : TWITCH_CLIENT_ID);
+  const clientSecret = propClientSecret || (constLooksLikeValue ? SCRIPT_PROP_TWITCH_CLIENT_SECRET : TWITCH_CLIENT_SECRET);
 
   if (!clientId || !clientSecret) return null;
   return { clientId, clientSecret };
@@ -290,63 +297,43 @@ function fetchKick(username) {
 }
 
 function fetchStreamChartsKickAvg(username) {
-  // AeroKick — данные встроены в HTML как SSR, парсим avg_viewers из страницы
   const pageUrl = `https://aerokick.app/stats/channels/${username.toLowerCase()}?range=month`;
 
   const resp = UrlFetchApp.fetch(pageUrl, {
     method: 'get',
     headers: {
-      'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
     },
-    muteHttpExceptions: true
+    muteHttpExceptions: true,
+    followRedirects: true,
   });
 
   const code = resp.getResponseCode();
   const body = resp.getContentText();
 
   Logger.log(`AeroKick [${username}] HTTP ${code}: ${body.substring(0, 200)}`);
-
   if (code !== 200) return null;
 
   try {
-    // Данные встроены в HTML как SSR в блоках streamController.enqueue()
-    // Структура в конце второго блока: "TopCategories",[...], "Counter-Strike 2", "value", 108.91562]
-    // Ищем "\"value\"," за которым сразу идёт число — это avg по топ категории за период
-
-    // Метод 1: "value", число — в конце данных страницы
-    const valueMatch = body.match(/"value",(\d+\.?\d*)\]/);
+    // Самый стабильный паттерн из SSR: "value",108.9]
+    const valueMatch = body.match(/"value",\s*(\d+\.?\d*)\]/i);
     if (valueMatch) {
-      Logger.log(`AeroKick [${username}] value match: ${valueMatch[1]}`);
-      return Math.round(parseFloat(valueMatch[1]));
+      const n = Number(valueMatch[1]);
+      if (Number.isFinite(n)) return Math.round(n);
     }
 
-    // Метод 2: найти среднее прямо в HTML из блока с текстом Average Viewers
-    // <div class="...tabular-nums...">100.6</div>
-    const tabularMatch = body.match(/tabular-nums[^>]*>(\d+\.?\d*)<\/div>/g);
-    if (tabularMatch && tabularMatch.length > 0) {
-      const firstNum = tabularMatch[0].match(/>(\d+\.?\d*)</);
-      if (firstNum) {
-        Logger.log(`AeroKick [${username}] tabular match: ${firstNum[1]}`);
-        return Math.round(parseFloat(firstNum[1]));
-      }
+    // Fallback: ищем только первый tabular-nums после блока "Average Viewers"
+    const avgBlock = body.match(/Average Viewers[\s\S]{0,800}?tabular-nums[^>]*>(\d+\.?\d*)</i);
+    if (avgBlock) {
+      const n = Number(avgBlock[1]);
+      if (Number.isFinite(n)) return Math.round(n);
     }
 
-    // Метод 3: найти "Average Viewers" и взять число рядом
-    const avgSection = body.match(/Average Viewers[\s\S]{0,300}/);
-    if (avgSection) {
-      const num = avgSection[0].match(/(\d+\.?\d{0,2})/g);
-      if (num) {
-        Logger.log(`AeroKick [${username}] avg section: ${num[0]}`);
-        return Math.round(parseFloat(num[0]));
-      }
-    }
-
-    Logger.log(`AeroKick [${username}] no match found`);
     return null;
   } catch(e) {
-    Logger.log(`AeroKick parse error [${username}]: ${e}`);
+    Logger.log(`AeroKick parse error [${username}]: ${e.message}`);
     return null;
   }
 }
@@ -376,6 +363,7 @@ function fetchKickFollowers(username) {
     `https://kick.com/api/v2/channels/${normalized}`,
     `https://api.kick.com/private/v1/channels/${normalized}`,
     `https://api.kick.com/public/v1/channels/${normalized}`,
+    `https://kick.com/api/v1/channels/${normalized}`,
   ];
 
   for (const endpoint of endpoints) {
@@ -455,8 +443,9 @@ function fetchKickFollowers(username) {
 // ── УТИЛИТЫ ──────────────────────────────────────────────────
 
 function extractUsername(url, domain) {
-  const regex = new RegExp(domain.replace('.', '\\.') + '\\/([a-zA-Z0-9_]+)');
-  const match = url.match(regex);
+  const normalized = String(url).trim();
+  const regex = new RegExp('(?:https?:\\/\\/)?(?:www\\.)?' + domain.replace('.', '\\.') + '\\/([a-zA-Z0-9_.-]+)', 'i');
+  const match = normalized.match(regex);
   return match ? match[1] : null;
 }
 
