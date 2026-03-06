@@ -282,31 +282,70 @@ function fetchTwitchFollowers(username, token) {
 
 // ── KICK — AVG VIEWERS (AeroKick) ───────────────────────────
 function fetchAeroKickAvg(username) {
-  const pageUrl = `https://aerokick.app/stats/channels/${username.toLowerCase()}?range=month`;
+  const normalized = username.toLowerCase();
+  const aeroKickUrl = `https://aerokick.app/stats/channels/${normalized}?range=month`;
 
   try {
-    const resp = UrlFetchApp.fetch(pageUrl, {
+    const resp = UrlFetchApp.fetch(aeroKickUrl, {
+      method: 'get',
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/json' },
+      muteHttpExceptions: true,
+      followRedirects: true,
+    });
+
+    if (resp.getResponseCode() === 200) {
+      const body = resp.getContentText();
+      const parsed = tryParseAvgViewers(body);
+      if (parsed !== null) return parsed;
+    }
+  } catch (e) {
+    Logger.log(`AeroKick AVG ошибка ${username}: ${e.message}`);
+  }
+
+  // Fallback: Streamscharts (Kick)
+  try {
+    const scUrl = `https://streamscharts.com/channels/${normalized}?platform=kick`;
+    const resp = UrlFetchApp.fetch(scUrl, {
       method: 'get',
       headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html' },
       muteHttpExceptions: true,
+      followRedirects: true,
     });
 
     if (resp.getResponseCode() !== 200) return null;
 
     const body = resp.getContentText();
-    const valueMatch = body.match(/"value",(\d+\.?\d*)\]/);
-
-    if (valueMatch) {
-      return Math.round(parseFloat(valueMatch[1]));
-    }
-
-    return null;
+    return tryParseAvgViewers(body);
   } catch (e) {
+    Logger.log(`Streamscharts AVG ошибка ${username}: ${e.message}`);
     return null;
   }
 }
 
 // ── KICK — FOLLOWERS ✅ NEW API (WORKING) ───────────────────
+function tryParseAvgViewers(text) {
+  if (!text) return null;
+
+  const patterns = [
+    /"avg[_-]?viewers"\s*:\s*(\d+(?:\.\d+)?)/i,
+    /"average[_-]?viewers"\s*:\s*(\d+(?:\.\d+)?)/i,
+    /"avgViewers"\s*:\s*(\d+(?:\.\d+)?)/i,
+    /"value",(\d+\.?\d*)\]/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) continue;
+
+    const value = Number(match[1]);
+    if (Number.isFinite(value)) {
+      return Math.round(value);
+    }
+  }
+
+  return null;
+}
+
 function fetchKickFollowers(username) {
   try {
     // ✅ НОВЫЙ ENDPOINT который работает!
@@ -349,7 +388,7 @@ function fetchKickFollowers(username) {
 
 // ── УТИЛИТЫ ──────────────────────────────────────────────────
 function extractUsername(url, domain) {
-  const regex = new RegExp(domain.replace('.', '\\.') + '\\/([a-zA-Z0-9_]+)');
+  const regex = new RegExp(domain.replace('.', '\\.') + '\\/([a-zA-Z0-9_.-]+)');
   const match = url.match(regex);
   return match ? match[1] : null;
 }
