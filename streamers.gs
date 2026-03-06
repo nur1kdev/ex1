@@ -6,8 +6,10 @@
 // ============================================================
 
 // ── ТВОИ КЛЮЧИ ──────────────────────────────────────────────
-const TWITCH_CLIENT_ID     = 'e961qn1qk18bk8gk5hcmz61c687y8i';
-const TWITCH_CLIENT_SECRET = 'pei0rmegkkmjrklfvlo6mq10d857ff';
+const TWITCH_CLIENT_ID     = ''; // fallback: можно оставить пустым и хранить в Script Properties
+const TWITCH_CLIENT_SECRET = ''; // fallback: можно оставить пустым и хранить в Script Properties
+const SCRIPT_PROP_TWITCH_CLIENT_ID = 'TWITCH_CLIENT_ID';
+const SCRIPT_PROP_TWITCH_CLIENT_SECRET = 'TWITCH_CLIENT_SECRET';
 // ───────────────────────────────────────────────────────────
 
 // ── НАСТРОЙКИ ТАБЛИЦЫ ───────────────────────────────────────
@@ -18,6 +20,29 @@ const COL_FOLLOWERS  = 6;  // F — Followers
 const START_ROW      = 2;
 // ───────────────────────────────────────────────────────────
 
+
+
+function getTwitchCredentials() {
+  const props = PropertiesService.getScriptProperties();
+  const propClientId = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_ID);
+  const propClientSecret = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_SECRET);
+
+  const clientId = propClientId || TWITCH_CLIENT_ID;
+  const clientSecret = propClientSecret || TWITCH_CLIENT_SECRET;
+
+  if (!clientId || !clientSecret) return null;
+  return { clientId, clientSecret };
+}
+
+function setTwitchCredentials(clientId, clientSecret) {
+  if (!clientId || !clientSecret) {
+    throw new Error('Передай TWITCH_CLIENT_ID и TWITCH_CLIENT_SECRET');
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(SCRIPT_PROP_TWITCH_CLIENT_ID, clientId);
+  props.setProperty(SCRIPT_PROP_TWITCH_CLIENT_SECRET, clientSecret);
+}
 
 // ── ГЛАВНАЯ ФУНКЦИЯ ─────────────────────────────────────────
 
@@ -198,11 +223,14 @@ function getTwitchToken() {
 
   if (saved && exp && Date.now() < parseInt(exp, 10)) return saved;
 
+  const creds = getTwitchCredentials();
+  if (!creds) return null;
+
   const resp = UrlFetchApp.fetch('https://id.twitch.tv/oauth2/token', {
     method: 'post',
     payload: {
-      client_id:     TWITCH_CLIENT_ID,
-      client_secret: TWITCH_CLIENT_SECRET,
+      client_id:     creds.clientId,
+      client_secret: creds.clientSecret,
       grant_type:    'client_credentials'
     },
     muteHttpExceptions: true
@@ -218,11 +246,14 @@ function getTwitchToken() {
 }
 
 function fetchTwitchFollowers(username, token) {
+  const creds = getTwitchCredentials();
+  if (!creds || !token) return null;
+
   const userResp = UrlFetchApp.fetch(
     `https://api.twitch.tv/helix/users?login=${encodeURIComponent(username)}`,
     {
       headers: {
-        'Client-ID':     TWITCH_CLIENT_ID,
+        'Client-ID':     creds.clientId,
         'Authorization': `Bearer ${token}`
       },
       muteHttpExceptions: true
@@ -238,7 +269,7 @@ function fetchTwitchFollowers(username, token) {
     `https://api.twitch.tv/helix/channels/followers?broadcaster_id=${userId}&first=1`,
     {
       headers: {
-        'Client-ID':     TWITCH_CLIENT_ID,
+        'Client-ID':     creds.clientId,
         'Authorization': `Bearer ${token}`
       },
       muteHttpExceptions: true
@@ -320,25 +351,104 @@ function fetchStreamChartsKickAvg(username) {
   }
 }
 
-function fetchKickFollowers(username) {
-  // Kick API v2 — точные данные по followers
-  const resp = UrlFetchApp.fetch(`https://kick.com/api/v2/channels/${username}`, {
-    headers: {
-      'Accept':     'application/json',
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-    },
-    muteHttpExceptions: true
-  });
+function extractKickFollowers(payload) {
+  if (!payload || typeof payload !== 'object') return null;
 
-  if (resp.getResponseCode() !== 200) return null;
+  const candidates = [
+    payload?.followers_count,
+    payload?.data?.followers_count,
+    payload?.channel?.followers_count,
+    payload?.data?.channel?.followers_count,
+    payload?.livestream?.channel?.followers_count,
+  ];
 
-  try {
-    const data = JSON.parse(resp.getContentText());
-    // v2 возвращает followers_count напрямую
-    return data?.followers_count ?? null;
-  } catch(e) {
-    return null;
+  for (const candidate of candidates) {
+    const n = Number(candidate);
+    if (Number.isFinite(n)) return Math.round(n);
   }
+
+  return null;
+}
+
+function fetchKickFollowers(username) {
+  const normalized = username.toLowerCase();
+  const endpoints = [
+    `https://kick.com/api/v2/channels/${normalized}`,
+    `https://api.kick.com/private/v1/channels/${normalized}`,
+    `https://api.kick.com/public/v1/channels/${normalized}`,
+  ];
+
+  for (const endpoint of endpoints) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const resp = UrlFetchApp.fetch(endpoint, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Origin': 'https://kick.com',
+            'Referer': `https://kick.com/${normalized}`,
+          },
+          muteHttpExceptions: true,
+          followRedirects: true,
+        });
+
+        const code = resp.getResponseCode();
+        if (code === 429 || code >= 500) {
+          if (attempt < 2) {
+            Utilities.sleep(700);
+            continue;
+          }
+          Logger.log(`Kick followers retry failed ${code} ${endpoint}`);
+          break;
+        }
+
+        if (code !== 200) {
+          Logger.log(`Kick followers HTTP ${code} ${endpoint}`);
+          break;
+        }
+
+        const payload = JSON.parse(resp.getContentText());
+        const followers = extractKickFollowers(payload);
+        if (followers !== null) {
+          Logger.log(`Kick followers [${normalized}] source=${endpoint} value=${followers}`);
+          return followers;
+        }
+
+        break;
+      } catch (e) {
+        if (attempt < 2) {
+          Utilities.sleep(700);
+          continue;
+        }
+        Logger.log(`Kick followers error ${endpoint}: ${e.message}`);
+      }
+    }
+  }
+
+  // HTML fallback
+  try {
+    const pageResp = UrlFetchApp.fetch(`https://kick.com/${normalized}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      muteHttpExceptions: true,
+      followRedirects: true,
+    });
+
+    if (pageResp.getResponseCode() === 200) {
+      const html = pageResp.getContentText();
+      const m = html.match(/"followers_count"\s*:\s*(\d+)/i) || html.match(/followers_count\D+(\d+)/i);
+      if (m) {
+        const n = Number(m[1]);
+        if (Number.isFinite(n)) {
+          Logger.log(`Kick followers [${normalized}] source=html value=${n}`);
+          return n;
+        }
+      }
+    }
+  } catch (e) {
+    Logger.log(`Kick followers html fallback error [${normalized}]: ${e.message}`);
+  }
+
+  return null;
 }
 
 
@@ -358,7 +468,21 @@ function onOpen() {
     .createMenu('🎮 Стримеры')
     .addItem('Обновить всех', 'updateAllStreamers')
     .addItem('Обновить выбранную строку', 'updateSelectedRow')
+    .addSeparator()
+    .addItem('Проверить Twitch ключи', 'showTwitchCredentialsStatus')
     .addToUi();
+}
+
+function showTwitchCredentialsStatus() {
+  const creds = getTwitchCredentials();
+  const ui = SpreadsheetApp.getUi();
+
+  if (!creds) {
+    ui.alert('❌ Twitch ключи не найдены. Добавь TWITCH_CLIENT_ID и TWITCH_CLIENT_SECRET в Script Properties (Project Settings).');
+    return;
+  }
+
+  ui.alert('✅ Twitch ключи настроены.');
 }
 
 // ── АВТОЗАПОЛНЕНИЕ ССЫЛОК ПРИ ВСТАВКЕ URL ───────────────────
