@@ -70,11 +70,7 @@ function updateStreamersByPlatform(platform) {
     return;
   }
 
-  const token = platform === 'kick' ? null : getTwitchToken();
-  if (!token && platform !== 'kick') {
-    SpreadsheetApp.getUi().alert('❌ Ошибка Twitch токена');
-    return;
-  }
+  let token = null;
 
   let updated = 0;
   let skipped = 0;
@@ -104,6 +100,15 @@ function updateStreamersByPlatform(platform) {
       if (isTwitch) {
         const username = extractUsername(url, 'twitch.tv');
         if (!username) continue;
+
+        if (!token) {
+          token = getTwitchToken();
+          if (!token) {
+            Logger.log('❌ Не удалось получить Twitch токен. Проверьте Script Properties: TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET');
+            skipped++;
+            continue;
+          }
+        }
 
         const avgOnline = fetchTwitchTrackerAvg(username);
         const followers = fetchTwitchFollowers(username, token);
@@ -155,6 +160,12 @@ function updateSelectedRow() {
   if (urlLower.includes('twitch.tv')) {
     const username = extractUsername(url, 'twitch.tv');
     const token = getTwitchToken();
+
+    if (!token) {
+      ui.alert('❌ Не удалось получить Twitch токен.\nПроверьте Script Properties: TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET');
+      return;
+    }
+
     avgOnline = fetchTwitchTrackerAvg(username);
     followers = fetchTwitchFollowers(username, token);
   } else if (urlLower.includes('kick.com')) {
