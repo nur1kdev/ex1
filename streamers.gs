@@ -5,8 +5,8 @@
 // ============================================================
 
 // ── ТВОИ КЛЮЧИ TWITCH ───────────────────────────────────────
-const TWITCH_CLIENT_ID = 'e961qn1qk18bk8gk5hcmz61c687y8i';
-const TWITCH_CLIENT_SECRET = 'pei0rmegkkmjrklfvlo6mq10d857ff';
+const SCRIPT_PROP_TWITCH_CLIENT_ID = 'TWITCH_CLIENT_ID';
+const SCRIPT_PROP_TWITCH_CLIENT_SECRET = 'TWITCH_CLIENT_SECRET';
 // ───────────────────────────────────────────────────────────
 
 // ── НАСТРОЙКИ КОЛОНОК ───────────────────────────────────────
@@ -17,6 +17,30 @@ const START_ROW = 2;
 const COL_TWITCHTRACKER = 8; // H — TwitchTracker
 const COL_SCHARTS = 9; // I — SCharts
 // ───────────────────────────────────────────────────────────
+
+// ── TWITCH CREDENTIALS (Script Properties) ─────────────────
+
+function getTwitchCredentials() {
+  const props = PropertiesService.getScriptProperties();
+  const clientId = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_ID);
+  const clientSecret = props.getProperty(SCRIPT_PROP_TWITCH_CLIENT_SECRET);
+
+  if (!clientId || !clientSecret) {
+    return null;
+  }
+
+  return { clientId, clientSecret };
+}
+
+function setTwitchCredentials(clientId, clientSecret) {
+  if (!clientId || !clientSecret) {
+    throw new Error('Передайте TWITCH_CLIENT_ID и TWITCH_CLIENT_SECRET');
+  }
+
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(SCRIPT_PROP_TWITCH_CLIENT_ID, clientId);
+  props.setProperty(SCRIPT_PROP_TWITCH_CLIENT_SECRET, clientSecret);
+}
 
 // ── ОБНОВИТЬ ВСЕХ ───────────────────────────────────────────
 function updateAllStreamers() {
@@ -46,7 +70,7 @@ function updateStreamersByPlatform(platform) {
     return;
   }
 
-  const token = getTwitchToken();
+  const token = platform === 'kick' ? null : getTwitchToken();
   if (!token && platform !== 'kick') {
     SpreadsheetApp.getUi().alert('❌ Ошибка Twitch токена');
     return;
@@ -193,12 +217,15 @@ function getTwitchToken() {
 
   if (saved && exp && Date.now() < parseInt(exp, 10)) return saved;
 
+  const creds = getTwitchCredentials();
+  if (!creds) return null;
+
   try {
     const resp = UrlFetchApp.fetch('https://id.twitch.tv/oauth2/token', {
       method: 'post',
       payload: {
-        client_id: TWITCH_CLIENT_ID,
-        client_secret: TWITCH_CLIENT_SECRET,
+        client_id: creds.clientId,
+        client_secret: creds.clientSecret,
         grant_type: 'client_credentials',
       },
       muteHttpExceptions: true,
@@ -216,9 +243,12 @@ function getTwitchToken() {
 }
 
 function fetchTwitchFollowers(username, token) {
+  const creds = getTwitchCredentials();
+  if (!creds || !token) return null;
+
   try {
     const userResp = UrlFetchApp.fetch(`https://api.twitch.tv/helix/users?login=${encodeURIComponent(username)}`, {
-      headers: { 'Client-ID': TWITCH_CLIENT_ID, Authorization: `Bearer ${token}` },
+      headers: { 'Client-ID': creds.clientId, Authorization: `Bearer ${token}` },
       muteHttpExceptions: true,
     });
 
@@ -228,7 +258,7 @@ function fetchTwitchFollowers(username, token) {
     const userId = userData.data[0].id;
 
     const fResp = UrlFetchApp.fetch(`https://api.twitch.tv/helix/channels/followers?broadcaster_id=${userId}&first=1`, {
-      headers: { 'Client-ID': TWITCH_CLIENT_ID, Authorization: `Bearer ${token}` },
+      headers: { 'Client-ID': creds.clientId, Authorization: `Bearer ${token}` },
       muteHttpExceptions: true,
     });
 
@@ -323,7 +353,21 @@ function onOpen() {
     .addItem('🟢 Обновить Kick', 'updateKickStreamers')
     .addSeparator()
     .addItem('🎯 Обновить строку', 'updateSelectedRow')
+    .addSeparator()
+    .addItem('🔐 Проверить Twitch ключи', 'showTwitchCredentialsStatus')
     .addToUi();
+}
+
+function showTwitchCredentialsStatus() {
+  const ui = SpreadsheetApp.getUi();
+  const creds = getTwitchCredentials();
+
+  if (!creds) {
+    ui.alert('❌ Twitch ключи не настроены в Script Properties.\n\nОткройте: Project Settings → Script properties и добавьте TWITCH_CLIENT_ID / TWITCH_CLIENT_SECRET.');
+    return;
+  }
+
+  ui.alert('✅ Twitch ключи найдены в Script Properties.');
 }
 
 // ── АВТОЗАПОЛНЕНИЕ ССЫЛОК ПРИ ВСТАВКЕ URL ───────────────────
